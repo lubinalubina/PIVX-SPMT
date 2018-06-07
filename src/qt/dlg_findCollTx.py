@@ -8,16 +8,12 @@ from PyQt5.QtWidgets import QDialog, QDialogButtonBox, QLineEdit
 from PyQt5.QtWidgets import QVBoxLayout, QLabel, QSpacerItem, QSizePolicy, QTableWidget, QAbstractScrollArea, QAbstractItemView, QTableWidgetItem
 from PyQt5.Qt import QHBoxLayout, QHeaderView
 from threads import ThreadFuns
-from apiClient import ApiClient
 from misc import printDbg
 
 class FindCollTx_dlg(QDialog):
-    def __init__(self, main_wnd, rpcClient, pivx_addr):
-        QDialog.__init__(self, parent=main_wnd)
-        self.main_wnd = main_wnd
-        self.rpcClient = rpcClient
-        self.apiClient = ApiClient()
-        self.pivx_addr = pivx_addr
+    def __init__(self, mainTab):
+        QDialog.__init__(self, parent=mainTab.ui)
+        self.mainTab = mainTab
         self.utxos = []
         self.blockCount = 0
         self.setupUI()
@@ -28,15 +24,19 @@ class FindCollTx_dlg(QDialog):
     def setupUI(self):
         Ui_FindCollateralTxDlg.setupUi(self, self)
         self.setWindowTitle('Find Collateral Tx')
-        ##--- PIVX Address
-        self.edtAddress.setText(self.pivx_addr)
         ##--- feedback
         self.lblMessage.setVisible(False)
         self.lblMessage.setVisible(True)
         self.lblMessage.setText('Checking explorer...')
-        ##--- Load UTXOs
-        self.runInThread = ThreadFuns.runInThread
-        self.runInThread(self.load_utxos_thread, (), self.display_utxos)
+        
+        
+        
+    def load_data(self, pivx_addr):
+        self.pivx_addr = pivx_addr
+        ##--- PIVX Address
+        self.edtAddress.setText(self.pivx_addr)
+        ##--- Load utxos
+        ThreadFuns.runInThread(self.load_utxos_thread, (), self.display_utxos)
 
 
 
@@ -67,7 +67,7 @@ class FindCollTx_dlg(QDialog):
                                         'amount sent to address %s.</b> (or explorer offline - try manually)' %
                                         self.pivx_addr)
             else:
-                self.lblMessage.setText('<b style="color:purple">Unable to connect to API provider.\nEnter tx manually</b>')
+                self.lblMessage.setText('<b style="color:purple">Unable to connect to API provider or RPC server.\nEnter tx manually</b>')
             self.lblMessage.setVisible(True)
         
         
@@ -76,15 +76,15 @@ class FindCollTx_dlg(QDialog):
     def load_utxos_thread(self, ctrl):
         self.apiConnected = False
         try:
-            if not self.rpcClient.getStatus():
+            if not self.mainTab.caller.rpcClient.getStatus():
                 printDbg('PIVX daemon not connected')
             else:
                 try:
-                    if self.apiClient.getStatus() != 200:
+                    if self.mainTab.caller.apiClient.getStatus() != 200:
                         return
                     self.apiConnected = True
-                    self.blockCount = self.rpcClient.getBlockCount()
-                    utxos = self.apiClient.getAddressUtxos(self.pivx_addr)['unspent_outputs']
+                    self.blockCount = self.mainTab.caller.rpcClient.getBlockCount()
+                    utxos = self.mainTab.caller.apiClient.getAddressUtxos(self.pivx_addr)['unspent_outputs']
                     printDbg("loading utxos\nblockCount=%s\n%s" % (str(self.blockCount), str(self.utxos)))
                     self.utxos = [utxo for utxo in utxos if round(int(utxo.get('value', 0))/1e8, 8) == 10000.00000000 ]
 
@@ -93,7 +93,6 @@ class FindCollTx_dlg(QDialog):
                     print(self.errorMsg)
                     
         except Exception as e:
-            print(e)
             pass
         
         

@@ -6,7 +6,7 @@ from bitcoin import bin_hash160
 from time import sleep
 from misc import printDbg, printException, printOK, getCallerName, getFunctionName, splitString
 from constants import MPATH
-from PyQt5.QtWidgets import QMessageBox
+from PyQt5.QtWidgets import QMessageBox, QApplication
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.Qt import QObject
 from threads import ThreadFuns
@@ -26,7 +26,7 @@ def process_ledger_exceptions(func):
                 e.message += '\n\nMake sure the PIVX app is running on your Ledger device.'
             elif (e.sw == 0x6982):
                 e.message += '\n\nMake sure you have entered the PIN on your Ledger device.'
-            raise
+            printException(getCallerName(), getFunctionName(), e.message, e.args)
     return process_ledger_exceptions_int
 
 
@@ -40,6 +40,10 @@ class HWdevice(QObject):
     sigTxdone = pyqtSignal(bytearray, str)
     # signal: sigtx (thread) is done (aborted) - emitted by signTxFinish
     sigTxabort = pyqtSignal()
+    # signal: tx_progress percent - emitted by perepare_transfer_tx_bulk
+    tx_progress = pyqtSignal(int)
+    # signal: sig_progress percent - emitted by signTxSign
+    sig_progress = pyqtSignal(str)
     
     def __init__(self, *args, **kwargs):
         QObject.__init__(self, *args, **kwargs)
@@ -47,28 +51,30 @@ class HWdevice(QObject):
         self.lock = threading.Lock()
         printDbg("Creating HW device class")
         self.initDevice()
+        # Connect signal
+        self.sig_progress.connect(self.updateSigProgress)
+        
         
     @process_ledger_exceptions
     def initDevice(self):
         try:
             self.lock.acquire()
+            self.status = 0
             if hasattr(self, 'dongle'):
                 self.dongle.close()
             self.dongle = getDongle(False)
             printOK('Ledger Nano S drivers found')
             self.chip = btchip(self.dongle)
             printDbg("Ledger Initialized")
-            self.initialized = True
             ver = self.chip.getFirmwareVersion()
             printOK("Ledger HW device connected [v. %s]" % str(ver.get('version')))
-            
+            self.status = 2
             
         except Exception as e:
-            err_msg = 'error Initializing Ledger'
-            printException(getCallerName(), getFunctionName(), err_msg, e.args)
-            self.initialized = False
             if hasattr(self, 'dongle'):
+                self.status = 1
                 self.dongle.close()
+            raise
                 
         finally:
             self.lock.release()
@@ -79,53 +85,12 @@ class HWdevice(QObject):
     # 0 - not connected
     # 1 - not in pivx app
     # 2 - fine
-    def getStatusCode(self):
-        try:
-            if self.initialized:
-                if not self.checkApp():
-                    statusCode = 1     
-                else:
-                    statusCode = 2
-            else:
-                statusCode = 0          
-        except Exception as e:
-            err_msg = 'error in getStatusCode'
-            printException(getCallerName(), getFunctionName(), err_msg, e.args)
-            statusCode = 0
-        return statusCode
-    
-    
-    
-        
-    def getStatusMess(self, statusCode = None):
-        if statusCode == None or not statusCode in [0, 1, 2]:
-            statusCode = self.getStatusCode()
+    def getStatus(self):
         messages = {
             0: 'Unable to connect to the device.',
             1: 'Unable to connect to the device. Please check that the PIVX app on the device is open, and try again.',
             2: 'Hardware device connected.'}
-        return messages[statusCode]
-    
-    
-        
-    
-    @process_ledger_exceptions
-    def checkApp(self):
-        printDbg("Checking app")
-        self.lock.acquire()
-        try:
-            firstAddress = self.chip.getWalletPublicKey(MPATH + "0'/0/0").get('address')[12:-2]
-
-            if firstAddress[0] == 'D':
-                printOK("found PIVX app on ledger device")
-                return True       
-        except Exception as e:
-            err_msg = 'error in checkApp'
-            printException(getCallerName(), getFunctionName(), err_msg, e.args)
-            
-        finally:
-            self.lock.release()
-        return False 
+        return self.status, messages[self.status]
     
     
     
@@ -156,6 +121,11 @@ class HWdevice(QObject):
                 
                 
                 trusted_input = self.chip.getTrustedInput(prev_transaction, utxo_tx_index)
+                
+                # completion percent emitted
+                completion = int(45*idx / len(utxos_to_spend))
+                self.tx_progress.emit(completion)
+                
                 self.trusted_inputs.append(trusted_input)
                
                 # Hash check
@@ -176,12 +146,19 @@ class HWdevice(QObject):
                     'outputIndex': utxo['tx_ouput_n'],
                     'txid': utxo['tx_hash']
                 })
+                
+                # completion percent emitted
+                completion = int(95*idx / len(utxos_to_spend))
+                self.tx_progress.emit(completion)
     
             self.amount -= int(tx_fee)
             self.amount = int(self.amount)
             arg_outputs = [{'address': dest_address, 'valueSat': self.amount}] # there will be multiple outputs soon
             self.new_transaction = bitcoinTransaction()  # new transaction object to be used for serialization at the last stage
             self.new_transaction.version = bytearray([0x01, 0x00, 0x00, 0x00])
+            
+            # completion percent emitted
+            self.tx_progress.emit(99)
         
         finally:
             self.lock.release()
@@ -195,16 +172,20 @@ class HWdevice(QObject):
         except Exception:
             raise
         
+        # completion percent emitted
+        self.tx_progress.emit(100)
         
         # join all outputs - will be used by Ledger for signing transaction
         self.all_outputs_raw = self.new_transaction.serializeOutputs()
 
         self.mBox2 = QMessageBox(caller)
-        messageText = "<p>Confirm transaction on your device, with the following details:</p>"
+        self.messageText = "<p>Confirm transaction on your device, with the following details:</p>"
         #messageText += "From bip32_path: <b>%s</b><br><br>" % str(bip32_path)
-        messageText += "<p>Payment to:<br><b>%s</b></p>" % dest_address
-        messageText += "<p>Net amount:<br><b>%s</b> PIV</p>" % str(round(self.amount / 1e8, 8))
-        messageText += "<p>Fees:<br><b>%s</b> PIV<p>" % str(round(int(tx_fee) / 1e8, 8))
+        self.messageText += "<p>Payment to:<br><b>%s</b></p>" % dest_address
+        self.messageText += "<p>Net amount:<br><b>%s</b> PIV</p>" % str(round(self.amount / 1e8, 8))
+        self.messageText += "<p>Fees:<br><b>%s</b> PIV<p>" % str(round(int(tx_fee) / 1e8, 8))
+        messageText = self.messageText + "Signature Progress: 0 %" 
+        self.mBox2.setText(messageText)
         self.mBox2.setText(messageText)
         self.mBox2.setIconPixmap(caller.tabMain.ledgerImg.scaledToHeight(200, Qt.SmoothTransformation))
         self.mBox2.setWindowTitle("CHECK YOUR LEDGER")
@@ -224,10 +205,13 @@ class HWdevice(QObject):
         self.arg_inputs = []
         self.amount = 0
         self.lock.acquire()
+        num_of_sigs = sum([len(mnode['utxos']) for mnode in mnodes])
+        curr_utxo_checked = 0
         try:
-            for mnode in mnodes:
-                for idx, utxo in enumerate(mnode['utxos']):
+            for i, mnode in enumerate(mnodes): 
                 
+                for idx, utxo in enumerate(mnode['utxos']):
+                                       
                     self.amount += int(utxo['value'])
                     raw_tx = bytearray.fromhex(rawtransactions[utxo['tx_hash']])
     
@@ -263,12 +247,22 @@ class HWdevice(QObject):
                         'outputIndex': utxo['tx_ouput_n'],
                         'txid': utxo['tx_hash']
                     })
+                    
+                    # completion percent emitted
+                    curr_utxo_checked += 1
+                    completion = int(95*curr_utxo_checked / num_of_sigs)
+                    self.tx_progress.emit(completion)
     
             self.amount -= int(tx_fee)
             self.amount = int(self.amount)
             arg_outputs = [{'address': dest_address, 'valueSat': self.amount}] # there will be multiple outputs soon
             self.new_transaction = bitcoinTransaction()  # new transaction object to be used for serialization at the last stage
             self.new_transaction.version = bytearray([0x01, 0x00, 0x00, 0x00])
+            
+            self.tx_progress.emit(99)
+            
+        except Exception:
+            raise
         
         finally:
             self.lock.release()
@@ -281,29 +275,30 @@ class HWdevice(QObject):
                 self.new_transaction.outputs.append(output)
         except Exception:
             raise
-        
+    
+        self.tx_progress.emit(100)
         
         # join all outputs - will be used by Ledger for signing transaction
         self.all_outputs_raw = self.new_transaction.serializeOutputs()
 
         self.mBox2 = QMessageBox(caller)
-        messageText = "<p>Confirm transaction on your device, with the following details:</p>"
+        self.messageText = "<p>Confirm transaction on your device, with the following details:</p>"
         #messageText += "From bip32_path: <b>%s</b><br><br>" % str(bip32_path)
-        messageText += "<p>Payment to:<br><b>%s</b></p>" % dest_address
-        messageText += "<p>Net amount:<br><b>%s</b> PIV</p>" % str(round(self.amount / 1e8, 8))
-        messageText += "<p>Fees:<br><b>%s</b> PIV<p>" % str(round(int(tx_fee) / 1e8, 8))
+        self.messageText += "<p>Payment to:<br><b>%s</b></p>" % dest_address
+        self.messageText += "<p>Net amount:<br><b>%s</b> PIV</p>" % str(round(self.amount / 1e8, 8))
+        self.messageText += "<p>Fees:<br><b>%s</b> PIV<p>" % str(round(int(tx_fee) / 1e8, 8))
+        messageText = self.messageText + "Signature Progress: 0 %" 
         self.mBox2.setText(messageText)
         self.mBox2.setIconPixmap(caller.tabMain.ledgerImg.scaledToHeight(200, Qt.SmoothTransformation))
         self.mBox2.setWindowTitle("CHECK YOUR LEDGER")
         self.mBox2.setStandardButtons(QMessageBox.NoButton)
         self.mBox2.setMaximumWidth(500)
         self.mBox2.show()
-        
+                
         ThreadFuns.runInThread(self.signTxSign, (), self.signTxFinish)
         
     
     
-    @process_ledger_exceptions
     def scanForAddress(self, account, spath, isTestnet=False):
         printOK("Scanning for Address n. %d on account n. %d" % (spath, account))
         curr_path = MPATH + "%d'/0/%d" % (account, spath) 
@@ -327,7 +322,6 @@ class HWdevice(QObject):
     
     
     
-    @process_ledger_exceptions
     def scanForBip32(self, account, address, starting_spath=0, spath_count=10, isTestnet=False):
         found = False
         spath = -1
@@ -364,7 +358,6 @@ class HWdevice(QObject):
             
             
     
-    @process_ledger_exceptions
     def scanForPubKey(self, account, spath):
         self.lock.acquire()
         printOK("Scanning for PubKey of address n. %d on account n. %d" % (spath, account))
@@ -409,7 +402,6 @@ class HWdevice(QObject):
             ans = mBox.exec_()        
             # we need to reconnect the device
             self.dongle.close()
-            self.initialized = False
             self.initDevice()
             
             if ans == QMessageBox.Abort:
@@ -485,13 +477,14 @@ class HWdevice(QObject):
         
         
         
-    @process_ledger_exceptions
     def signTxSign(self, ctrl):
         self.lock.acquire()
         try:
             starting = True
+            curr_input_signed = 0
             # sign all inputs on Ledger and add inputs in the self.new_transaction object for serialization
             for idx, new_input in enumerate(self.arg_inputs):
+                    
                 self.chip.startUntrustedTransaction(starting, idx, self.trusted_inputs, new_input['locking_script'])
                 
                 self.chip.finalizeInputFull(self.all_outputs_raw)
@@ -510,9 +503,15 @@ class HWdevice(QObject):
 
                 starting = False
                 
+                # signature percent emitted
+                curr_input_signed += 1
+                completion = int(100*curr_input_signed / len(self.arg_inputs))
+                self.sig_progress.emit(str(completion))
+                
             
             self.new_transaction.lockTime = bytearray([0, 0, 0, 0])
             self.tx_raw = bytearray(self.new_transaction.serialize())
+            self.sig_progress.emit("100")
             
         except Exception as e:
             printException(getCallerName(), getFunctionName(), "Signature Exception", e.args)
@@ -520,6 +519,7 @@ class HWdevice(QObject):
     
         finally:
             self.lock.release()
+    
     
             
     def signTxFinish(self):
@@ -535,3 +535,9 @@ class HWdevice(QObject):
         except Exception as e:    
             printDbg(e) 
                     
+    
+    
+    def updateSigProgress(self, text):
+        messageText = self.messageText + "Signature Progress: <b style='color:red'>" + text + " %</b>" 
+        self.mBox2.setText(messageText)
+        QApplication.processEvents()

@@ -6,13 +6,14 @@ sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
 
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QTableWidget, QTableWidgetItem,\
-    QAbstractScrollArea, QHeaderView, QLineEdit, QFormLayout, QDoubleSpinBox, QMessageBox
+    QAbstractScrollArea, QHeaderView, QLineEdit, QFormLayout, QDoubleSpinBox, QMessageBox,\
+    QApplication, QProgressBar
 from PyQt5.Qt import QLabel
 from PyQt5.QtCore import pyqtSlot
 from threads import ThreadFuns
 from constants import MPATH, cache_File
 from utils import checkPivxAddr
-from misc import printDbg, writeToFile
+from misc import printDbg, writeToFile, getCallerName, getFunctionName, printException
 import simplejson as json
 
 class SweepAll_dlg(QDialog):
@@ -22,6 +23,9 @@ class SweepAll_dlg(QDialog):
         self.setWindowTitle('Sweep All Rewards')
         self.setupUI()
         self.connectButtons()
+        
+        
+    def load_data(self):
         ThreadFuns.runInThread(self.load_utxos_thread, (), self.display_utxos)
         
     
@@ -45,31 +49,34 @@ class SweepAll_dlg(QDialog):
             item.setFlags(Qt.NoItemFlags)
             return item
         
-        self.ui.tableW.setRowCount(len(self.rewards))
-        numOfInputs = 0
-        for row, mnode in enumerate(self.rewards):
-            self.ui.tableW.setItem(row, 0, item(mnode['name']))
-            self.ui.tableW.setItem(row, 1, item(mnode['addr']))
-            newInputs = len(mnode['utxos'])
-            numOfInputs += newInputs
-            rewards_line = "%s PIV (%d payments)" % (mnode['total_rewards'], newInputs)
-            self.ui.tableW.setItem(row, 2, item(rewards_line))
-        
-        self.ui.tableW.resizeColumnsToContents()
-        self.ui.lblMessage.setVisible(False)
-        self.ui.tableW.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-        
-        total = sum([float(mnode['total_rewards']) for mnode in self.rewards])
-        self.ui.totalLine.setText("<b>%s</b>" % str(total))
-        
-        # update fee
-        estimatedTxSize = (44+numOfInputs*148)*1.0 / 1000   # kB
-        feePerKb = self.main_tab.caller.rpcClient.getFeePerKb()
-        suggestedFee = round(feePerKb * estimatedTxSize, 8)
-        self.ui.feeLine.setValue(suggestedFee)
-        
-        # load last used destination from cache
-        self.ui.edt_destination.setText(self.main_tab.caller.parent.cache.get("lastAddress"))
+        if len(self.rewards) == 0:
+            self.ui.lblMessage.setText("Unable to get raw TX from RPC server\nPlease wait for full synchronization and try again.")
+            
+        else:
+            self.ui.tableW.setRowCount(len(self.rewards))
+            numOfInputs = 0
+            for row, mnode in enumerate(self.rewards):
+                self.ui.tableW.setItem(row, 0, item(mnode['name']))
+                self.ui.tableW.setItem(row, 1, item(mnode['addr']))
+                newInputs = len(mnode['utxos'])
+                numOfInputs += newInputs
+                rewards_line = "%s PIV (%d payments)" % (mnode['total_rewards'], newInputs)
+                self.ui.tableW.setItem(row, 2, item(rewards_line))
+            
+            self.ui.tableW.resizeColumnsToContents()
+            self.ui.lblMessage.setVisible(False)
+            self.ui.tableW.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+            
+            total = sum([float(mnode['total_rewards']) for mnode in self.rewards])
+            self.ui.totalLine.setText("<b>%s</b>" % str(round(total,8)))
+            
+            # update fee
+            estimatedTxSize = (44+numOfInputs*148)*1.0 / 1000   # kB
+            suggestedFee = round(self.feePerKb * estimatedTxSize, 8)
+            self.ui.feeLine.setValue(suggestedFee)
+            
+            # load last used destination from cache
+            self.ui.edt_destination.setText(self.main_tab.caller.parent.cache.get("lastAddress"))
 
     
        
@@ -85,7 +92,7 @@ class SweepAll_dlg(QDialog):
             mnode['addr'] = addy
             mnode['path'] = MPATH + "%d'/0/%d" % (mn['hwAcc'], mn['collateral'].get('spath'))
             # get UTXOs of current masternode
-            mnode['utxos'] = self.main_tab.apiClient.getAddressUtxos(addy)['unspent_outputs']
+            mnode['utxos'] = self.main_tab.caller.apiClient.getAddressUtxos(addy)['unspent_outputs']
             # remove collateral
             mnode['utxos'] = [x for x in mnode['utxos'] if x['tx_hash'] != mn['collateral'].get('txid')]
             # compute total rewards
@@ -98,27 +105,24 @@ class SweepAll_dlg(QDialog):
                 rawtx = self.main_tab.caller.rpcClient.getRawTransaction(utxo['tx_hash'])
                 self.rawtransactions[utxo['tx_hash']] = rawtx
                 if rawtx is None:
-                    self.main_tab.caller.myPopUp2(QMessageBox.Critical, 'SPMT - rpc device check', "Unable to get raw TX from RPC server")
+                    print("Unable to get raw TX from RPC server\n")
+                    self.rewards = []
                     return
-                
-    
-    
-    @pyqtSlot()
-    def onButtonSend(self):
-        self.ui.loadingLine.show()
-        self.main_tab.caller.parent.app.processEvents()
-        self.sendRewards()
+        # update fee
+        self.feePerKb = self.main_tab.caller.rpcClient.getFeePerKb()        
     
     
     
     @pyqtSlot()
     def onButtonCancel(self):
-        self.ui.loadingLine.hide()
+        self.AbortSend()
         self.close()
         
-
         
-    def sendRewards(self):
+        
+
+    @pyqtSlot()
+    def onButtonSend(self):
         try:
             self.dest_addr = self.ui.edt_destination.text().strip()
             self.currFee = self.ui.feeLine.value() * 1e8
@@ -134,37 +138,58 @@ class SweepAll_dlg(QDialog):
                 return None
             
             printDbg("Preparing transaction. Please wait...")
+            self.ui.loadingLine.show()
+            self.ui.loadingLinePercent.show()
+            QApplication.processEvents()
             # save destination address to cache
             if self.dest_addr != self.main_tab.caller.parent.cache.get("lastAddress"):
                 self.main_tab.caller.parent.cache["lastAddress"] = self.dest_addr
                 writeToFile(self.main_tab.caller.parent.cache, cache_File)
                 
-            # connect signals
+            # re-connect signals
+            try:
+                self.main_tab.caller.hwdevice.sigTxdone.disconnect()
+            except:
+                pass
+            try:
+                self.main_tab.caller.hwdevice.sigTxabort.disconnect()
+            except:
+                pass
+            try:
+                self.main_tab.caller.hwdevice.tx_progress.disconnect()
+            except:
+                pass
             self.main_tab.caller.hwdevice.sigTxdone.connect(self.FinishSend)
             self.main_tab.caller.hwdevice.sigTxabort.connect(self.AbortSend)
-            
+            self.main_tab.caller.hwdevice.tx_progress.connect(self.updateProgressPercent)
+
             self.txFinished = False
             self.main_tab.caller.hwdevice.prepare_transfer_tx_bulk(self.main_tab.caller, self.rewards, self.dest_addr, self.currFee, self.rawtransactions)
             
                 
         except Exception as e:
-            print(e)
+            err_msg = "Exception in onButtonSend"
+            printException(getCallerName(), getFunctionName(), err_msg, e.args)
+           
             
     
     # Activated by signal sigTxabort from hwdevice
     def AbortSend(self):
         self.ui.loadingLine.hide()
+        self.ui.loadingLinePercent.setValue(0)
+        self.ui.loadingLinePercent.hide()
     
     
     
     # Activated by signal sigTxdone from hwdevice       
     #@pyqtSlot(bytearray, str)  
     def FinishSend(self, serialized_tx, amount_to_send):
-        self.ui.loadingLine.hide()
-        self.main_tab.caller.parent.app.processEvents()
+        self.AbortSend()
+        QApplication.processEvents()
         if not self.txFinished:
             try:
                 self.txFinished = True
+                self.close()
                 tx_hex = serialized_tx.hex()
                 printDbg("Raw signed transaction: " + tx_hex)
                 printDbg("Amount to send :" + amount_to_send)
@@ -198,10 +223,16 @@ class SweepAll_dlg(QDialog):
             except Exception as e:
                 err_msg = "Exception in FinishSend"
                 printException(getCallerName(), getFunctionName(), err_msg, e.args)
+
                 
-            finally:
-                self.close()
-        
+                
+                
+                
+    # Activated by signal tx_progress from hwdevice
+    #@pyqtSlot(str)
+    def updateProgressPercent(self, percent):
+        self.ui.loadingLinePercent.setValue(percent)
+        QApplication.processEvents()
         
         
    
@@ -239,12 +270,19 @@ class Ui_SweepAllDlg(object):
         self.tableW.setHorizontalHeaderItem(2, item)
         layout.addWidget(self.tableW)
         myForm = QFormLayout()
+        myForm.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
         hBox = QHBoxLayout()
         self.totalLine = QLabel("<b>0 PIV</b>")
         hBox.addWidget(self.totalLine)
-        self.loadingLine = QLabel("<b style='color:red'>Preparing TX. Please wait...</b>")
+        self.loadingLine = QLabel("<b style='color:red'>Preparing TX.</b> Completed: ")
+        self.loadingLinePercent = QProgressBar()
+        self.loadingLinePercent.setMaximumWidth(200)
+        self.loadingLinePercent.setMaximumHeight(10)
+        self.loadingLinePercent.setRange(0, 100)
         hBox.addWidget(self.loadingLine)
+        hBox.addWidget(self.loadingLinePercent)
         self.loadingLine.hide()
+        self.loadingLinePercent.hide()
         myForm.addRow(QLabel("Total Rewards: "), hBox)
         hBox = QHBoxLayout()
         self.edt_destination = QLineEdit()

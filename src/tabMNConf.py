@@ -23,6 +23,8 @@ class TabMNConf():
         self.runInThread = ThreadFuns.runInThread
         self.spath_found = False
         self.spath = -1
+        # Lookup Collateral dialog
+        self.dlg = FindCollTx_dlg(self)
         # Connect GUI buttons
         self.ui.btn_genKey.clicked.connect(lambda: self.onGenerateMNkey())
         self.ui.btn_addressToSpath.clicked.connect(lambda: self.onFindSpathAndPrivKey())
@@ -122,7 +124,6 @@ class TabMNConf():
             ans = mBox.exec_()
             # we need to reconnect the device
             self.caller.hwdevice.dongle.close()
-            self.caller.hwdevice.initialized = False
             self.caller.hwdevice.initDevice()
             
             if ans == QMessageBox.Abort:
@@ -208,10 +209,10 @@ class TabMNConf():
             printDbg("Unable to connect: %s" % self.caller.rpcStatusMess)
             return None
         try:
-            # Create Lookup dialog
-            ui = FindCollTx_dlg(self.ui, self.caller.rpcClient, currAddr)
-            if ui.exec_():
-                txid, txidn = ui.getSelection()
+            # Update Lookup dialog
+            self.dlg.load_data(currAddr)
+            if self.dlg.exec_():
+                txid, txidn = self.dlg.getSelection()
                 self.ui.edt_txid.setText(txid)
                 self.ui.edt_txidn.setValue(txidn)
        

@@ -11,7 +11,8 @@ from constants import MPATH, MINIMUM_FEE, cache_File
 
 from PyQt5.QtCore import Qt, pyqtSlot
 from PyQt5.QtGui import QFont
-from PyQt5.Qt import QTableWidgetItem, QHeaderView, QItemSelectionModel
+from PyQt5.Qt import QTableWidgetItem, QHeaderView, QItemSelectionModel,\
+    QApplication
 from PyQt5.QtWidgets import QMessageBox
 
 from qt.gui_tabRewards import TabRewards_gui
@@ -21,11 +22,11 @@ import simplejson as json
 class TabRewards():
     def __init__(self, caller):
         self.caller = caller
-        self.apiClient = ApiClient()
         ##--- Initialize Selection
         self.rewards = None
         self.selectedRewards = None
         self.rawtransactions = {}
+        self.feePerKb = MINIMUM_FEE
         ##--- Initialize GUI
         self.ui = TabRewards_gui()
         self.caller.tabRewards = self.ui
@@ -39,8 +40,6 @@ class TabRewards():
         self.ui.btn_deselectAllRewards.clicked.connect(lambda: self.onDeselectAllRewards())
         self.ui.btn_sendRewards.clicked.connect(lambda: self.onSendRewards())
         self.ui.btn_Cancel.clicked.connect(lambda: self.onCancel())
-        # Init first selection
-        self.loadMnSelect()
 
         
         
@@ -72,7 +71,7 @@ class TabRewards():
             if self.ui.rewardsList.box.collateralRow is not None:
                     self.ui.rewardsList.box.hideRow(self.ui.rewardsList.box.collateralRow)    
                     
-            if len(self.rewards) > 0:
+            if len(self.rewards) > 1:  # (collateral is a reward)
                 self.ui.rewardsList.box.resizeColumnsToContents()
                 self.ui.rewardsList.statusLabel.setVisible(False)
                 self.ui.rewardsList.box.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
@@ -87,6 +86,8 @@ class TabRewards():
                         self.ui.rewardsList.statusLabel.setText('<b style="color:purple">Unable to connect to API provider</b>')
                 self.ui.rewardsList.statusLabel.setVisible(True)
             
+    
+        
             
             
             
@@ -136,13 +137,20 @@ class TabRewards():
             
             else:
                 try:
-                    if self.apiClient.getStatus() != 200:
+                    if self.caller.apiClient.getStatus() != 200:
                         return
+                    
                     self.apiConnected = True
                     self.blockCount = self.caller.rpcClient.getBlockCount()
-                    self.rewards = self.apiClient.getAddressUtxos(self.curr_addr)['unspent_outputs']
+                    self.rewards = self.caller.apiClient.getAddressUtxos(self.curr_addr)['unspent_outputs']
+                    
                     for utxo in self.rewards:
-                        self.rawtransactions[utxo['tx_hash']] = self.caller.rpcClient.getRawTransaction(utxo['tx_hash'])
+                        rawtx = self.caller.rpcClient.getRawTransaction(utxo['tx_hash'])
+                        self.rawtransactions[utxo['tx_hash']] = rawtx
+                        if rawtx is None:
+                            print("Unable to get raw TX from RPC server\n")
+                            
+                    self.feePerKb = self.caller.rpcClient.getFeePerKb()
                             
                 except Exception as e:
                     self.errorMsg = 'Error occurred while calling getaddressutxos method: ' + str(e)
@@ -163,6 +171,7 @@ class TabRewards():
         self.ui.btn_toggleCollateral.setText("Show Collateral")
         self.ui.collateralHidden = True
         self.onChangeSelectedMN()
+        self.AbortSend()
     
     
     
@@ -174,7 +183,7 @@ class TabRewards():
             self.curr_txid = self.ui.mnSelect.itemData(self.ui.mnSelect.currentIndex())[1]
             self.curr_path = self.ui.mnSelect.itemData(self.ui.mnSelect.currentIndex())[2] 
             if self.curr_addr is not None:
-                result = self.apiClient.getBalance(self.curr_addr)
+                result = self.caller.apiClient.getBalance(self.curr_addr)
                 self.ui.addrAvailLine.setText("<i>%s PIVs</i>" % result)
             self.ui.selectedRewardsLine.setText("0.0")
             self.ui.rewardsList.box.clearSelection()
@@ -240,14 +249,33 @@ class TabRewards():
         if self.selectedRewards: 
             printDbg("Sending from PIVX address  %s  to PIVX address  %s " % (self.curr_addr, self.dest_addr))
             printDbg("Preparing transaction. Please wait...")
+            self.ui.loadingLine.show()
+            self.ui.loadingLinePercent.show()
+            QApplication.processEvents()            
             # save destination address to cache
             if self.dest_addr != self.caller.parent.cache.get("lastAddress"):
                 self.caller.parent.cache["lastAddress"] = self.dest_addr
                 writeToFile(self.caller.parent.cache, cache_File)
                                 
             self.currFee = self.ui.feeLine.value() * 1e8
-            # connect signal
+            
+            # re-connect signal
+            try:
+                self.caller.hwdevice.sigTxdone.disconnect()
+            except:
+                pass
+            try:
+                self.caller.hwdevice.sigTxabort.disconnect()
+            except:
+                pass
+            try:
+                self.caller.hwdevice.tx_progress.disconnect()
+            except:
+                pass
             self.caller.hwdevice.sigTxdone.connect(self.FinishSend)
+            self.caller.hwdevice.sigTxabort.connect(self.AbortSend)
+            self.caller.hwdevice.tx_progress.connect(self.updateProgressPercent)
+
             try:
                 self.txFinished = False
                 self.caller.hwdevice.prepare_transfer_tx(self.caller, self.curr_path, self.selectedRewards, self.dest_addr, self.currFee, self.rawtransactions)
@@ -294,6 +322,7 @@ class TabRewards():
     # Activated by signal sigTxdone from hwdevice       
     #@pyqtSlot(bytearray, str)            
     def FinishSend(self, serialized_tx, amount_to_send):
+        self.AbortSend()
         if not self.txFinished:
             try:
                 self.txFinished = True
@@ -332,7 +361,21 @@ class TabRewards():
                 err_msg = "Exception in FinishSend"
                 printException(getCallerName(), getFunctionName(), err_msg, e.args)
                 
-   
+    
+    # Activated by signal sigTxabort from hwdevice
+    def AbortSend(self):
+        self.ui.loadingLine.hide()
+        self.ui.loadingLinePercent.setValue(0)
+        self.ui.loadingLinePercent.hide()
+        
+        
+             
+    # Activated by signal tx_progress from hwdevice
+    #@pyqtSlot(str)
+    def updateProgressPercent(self, percent):
+        self.ui.loadingLinePercent.setValue(percent)
+        QApplication.processEvents()
+        
  
  
     def updateSelection(self, clicked_item=None):
@@ -343,13 +386,12 @@ class TabRewards():
             
             for i in range(0, numOfInputs):
                 total += int(self.selectedRewards[i].get('value'))
-                                     
+                                    
             # update suggested fee and selected rewards
             estimatedTxSize = (44+numOfInputs*148)*1.0 / 1000   # kB
-            feePerKb = self.caller.rpcClient.getFeePerKb()
-            suggestedFee = round(feePerKb * estimatedTxSize, 8)
+            suggestedFee = round(self.feePerKb * estimatedTxSize, 8)
             printDbg("estimatedTxSize is %s kB" % str(estimatedTxSize))
-            printDbg("suggested fee is %s PIV (%s PIV/kB)" % (str(suggestedFee), str(feePerKb)))
+            printDbg("suggested fee is %s PIV (%s PIV/kB)" % (str(suggestedFee), str(self.feePerKb)))
             
             self.ui.selectedRewardsLine.setText(str(round(total/1e8, 8)))
             self.ui.feeLine.setValue(suggestedFee)

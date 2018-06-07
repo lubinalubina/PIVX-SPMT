@@ -49,7 +49,7 @@ if __name__ == '__main__':
         updateSplash(label, i)
         progressBar.setFormat(str(i) + "%")
         t = time.time()
-        while time.time() < t + 0.015:
+        while time.time() < t + 0.01:
             app.processEvents()
            
     ### --------------       
@@ -57,11 +57,21 @@ if __name__ == '__main__':
     # Read Masternode List
     masternode_list = readMNfile()
     # Create QMainWindow Widget
-    ex = App(masternode_list, imgDir, app)
+    ex = App(masternode_list, imgDir)
     
     # Close Splashscreen
     splash.close()
+    
+    ##-- Lunch RPC watchdog
+    ex.mainWindow.rpc_watchdogThread.start()
+    
     # Execute App
-    sys.exit(app.exec_())
+    app.exec_()
+    try:
+        app.deleteLater()
+    except Exception as e:
+        print(e)
+        
+    sys.exit()
     
     
