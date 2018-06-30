@@ -26,8 +26,9 @@ def service_shutdown(signum, frame):
 
 class App(QMainWindow):
  
-    def __init__(self, masternode_list, imgDir):
+    def __init__(self, masternode_list, imgDir, app):
         super().__init__()
+        self.app = app
         # Register the signal handlers
         signal.signal(signal.SIGTERM, service_shutdown)
         signal.signal(signal.SIGINT, service_shutdown)
@@ -122,9 +123,6 @@ class App(QMainWindow):
     
     def onEditRPCServer(self):
         # Create Dialog
-        try:
-            ui = ConfigureRPCserver_dlg(self)
-            if ui.exec():
-                printDbg("Configuring RPC Server...")
-        except Exception as e:
-            print(e)
+        ui = ConfigureRPCserver_dlg(self)
+        if ui.exec():
+            printDbg("Configuring RPC Server...")

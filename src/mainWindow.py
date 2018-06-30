@@ -63,7 +63,6 @@ class MainWindow(QWidget):
         self.queue2 = Queue()
         sys.stdout = WriteStream(self.queue)
         sys.stderr = WriteStream(self.queue2)  
-      
         
         ###-- Init last logs
         logFile = open(log_File, 'w+')
@@ -345,15 +344,18 @@ class MainWindow(QWidget):
  
         
     def updateHWstatus(self, ctrl):          
-        if self.hwdevice is None:
-            self.hwdevice = HWdevice()
+        if self.hwdevice is not None:
+            if hasattr(self.hwdevice, 'dongle'):
+                self.hwdevice.dongle.close()
+                
+        self.hwdevice = HWdevice()
         
         statusCode, statusMess = self.hwdevice.getStatus()
         printDbg("mess: %s" % statusMess)
         if statusCode != 2:
             # If is not connected try again
             try:
-                if getattr(self.hwdevice, 'dongle', None) is not None:
+                if hasattr(self.hwdevice, 'dongle'):
                     self.hwdevice.dongle.close()
                 self.hwdevice = HWdevice()
                 self.hwdevice.initDevice()

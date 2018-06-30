@@ -1,5 +1,5 @@
 {
- "number": "0.2.2",
+ "number": "0.2.3",
  "tag": "a",
- "comments": ["Tx and sig progress"]
+ "comments": [""]
  }

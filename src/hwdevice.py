@@ -14,6 +14,8 @@ from utils import extract_pkh_from_locking_script, compose_tx_locking_script
 from pivx_hashlib import pubkey_to_address, single_sha256
 import threading
 
+class DisconnectedException(Exception):
+    pass
 
 def process_ledger_exceptions(func):
 
@@ -22,11 +24,23 @@ def process_ledger_exceptions(func):
             return func(*args, **kwargs)
         except BTChipException as e:
             printDbg('Error while communicating with Ledger hardware wallet.')
-            if (e.sw in (0x6d00, 0x6700)):
-                e.message += '\n\nMake sure the PIVX app is running on your Ledger device.'
+            e.message = 'Error while communicating with Ledger hardware wallet.'
+            if (e.sw in (0x6f01, 0x6d00, 0x6700, 0x6faa)):
+                e.message = 'Make sure the PIVX app is open on your Ledger device.'
+                e.message += '<br>If there is a program (such as Ledger Bitcoin Wallet) interfering with the USB communication, close it first.'
             elif (e.sw == 0x6982):
-                e.message += '\n\nMake sure you have entered the PIN on your Ledger device.'
+                e.message = 'Enter the PIN on your Ledger device.'
+            
             printException(getCallerName(), getFunctionName(), e.message, e.args)
+            raise DisconnectedException
+            
+        except Exception as e:
+            e.message = str(e.args[0])
+            if str(e.args[0]) == 'read error':
+                e.message = 'Read Error. Click "Connect" to reconnect HW device'
+            printException(getCallerName(), getFunctionName(), e.message, e.args)
+            raise DisconnectedException
+        
     return process_ledger_exceptions_int
 
 
@@ -74,7 +88,6 @@ class HWdevice(QObject):
             if hasattr(self, 'dongle'):
                 self.status = 1
                 self.dongle.close()
-            raise
                 
         finally:
             self.lock.release()
@@ -96,7 +109,7 @@ class HWdevice(QObject):
     
     
     @process_ledger_exceptions
-    def prepare_transfer_tx(self, caller, bip32_path,  utxos_to_spend, dest_address, tx_fee, rawtransactions):
+    def prepare_transfer_tx(self, caller, bip32_path,  utxos_to_spend, dest_address, tx_fee, rawtransactions, useSwiftX=False):
         # For each UTXO create a Ledger 'trusted input'
         self.trusted_inputs = []
         #    https://klmoney.wordpress.com/bitcoin-dissecting-transactions-part-2-building-a-transaction-by-hand)
@@ -183,7 +196,10 @@ class HWdevice(QObject):
         #messageText += "From bip32_path: <b>%s</b><br><br>" % str(bip32_path)
         self.messageText += "<p>Payment to:<br><b>%s</b></p>" % dest_address
         self.messageText += "<p>Net amount:<br><b>%s</b> PIV</p>" % str(round(self.amount / 1e8, 8))
-        self.messageText += "<p>Fees:<br><b>%s</b> PIV<p>" % str(round(int(tx_fee) / 1e8, 8))
+        if useSwiftX:
+            self.messageText += "<p>Fees (SwiftX flat rate):<br><b>%s</b> PIV<p>" % str(round(int(tx_fee) / 1e8, 8))
+        else:
+            self.messageText += "<p>Fees:<br><b>%s</b> PIV<p>" % str(round(int(tx_fee) / 1e8, 8))
         messageText = self.messageText + "Signature Progress: 0 %" 
         self.mBox2.setText(messageText)
         self.mBox2.setText(messageText)
@@ -198,7 +214,7 @@ class HWdevice(QObject):
         
         
     @process_ledger_exceptions
-    def prepare_transfer_tx_bulk(self, caller, mnodes, dest_address, tx_fee, rawtransactions):
+    def prepare_transfer_tx_bulk(self, caller, mnodes, dest_address, tx_fee, rawtransactions, useSwiftX=False):
         # For each UTXO create a Ledger 'trusted input'
         self.trusted_inputs = []
         #    https://klmoney.wordpress.com/bitcoin-dissecting-transactions-part-2-building-a-transaction-by-hand)
@@ -286,7 +302,10 @@ class HWdevice(QObject):
         #messageText += "From bip32_path: <b>%s</b><br><br>" % str(bip32_path)
         self.messageText += "<p>Payment to:<br><b>%s</b></p>" % dest_address
         self.messageText += "<p>Net amount:<br><b>%s</b> PIV</p>" % str(round(self.amount / 1e8, 8))
-        self.messageText += "<p>Fees:<br><b>%s</b> PIV<p>" % str(round(int(tx_fee) / 1e8, 8))
+        if useSwiftX:
+            self.messageText += "<p>Fees (SwiftX flat rate):<br><b>%s</b> PIV<p>" % str(round(int(tx_fee) / 1e8, 8))
+        else:
+            self.messageText += "<p>Fees:<br><b>%s</b> PIV<p>" % str(round(int(tx_fee) / 1e8, 8))
         messageText = self.messageText + "Signature Progress: 0 %" 
         self.mBox2.setText(messageText)
         self.mBox2.setIconPixmap(caller.tabMain.ledgerImg.scaledToHeight(200, Qt.SmoothTransformation))
@@ -381,7 +400,6 @@ class HWdevice(QObject):
     
     @process_ledger_exceptions        
     def signMess(self, caller, path, message):
-        self.lock.acquire()
         # Ledger doesn't accept characters other that ascii printable:
         # https://ledgerhq.github.io/btchip-doc/bitcoin-technical.html#_sign_message
         message = message.encode('ascii', 'ignore')
@@ -397,18 +415,22 @@ class HWdevice(QObject):
         mBox.setStandardButtons(QMessageBox.Retry | QMessageBox.Abort);
         
         # Ask confirmation
+        self.lock.acquire()
         info = self.chip.signMessagePrepare(path, message)
+        self.lock.release()
         while info['confirmationNeeded'] and info['confirmationType'] == 34:
             ans = mBox.exec_()        
+            
+            if ans == QMessageBox.Abort:
+                raise Exception("Reconnect HW device")
+            
             # we need to reconnect the device
             self.dongle.close()
             self.initDevice()
             
-            if ans == QMessageBox.Abort:
-                raise Exception('Message Signature failed')
-            
+            self.lock.acquire()
             info = self.chip.signMessagePrepare(path, message)
-            
+            self.lock.release()
 
         printOK('Signing Message')
         self.mBox = QMessageBox(caller.ui)
@@ -417,7 +439,6 @@ class HWdevice(QObject):
         self.mBox.setIconPixmap(caller.ui.ledgerImg.scaledToHeight(200, Qt.SmoothTransformation))
         self.mBox.setWindowTitle("CHECK YOUR LEDGER")
         self.mBox.setStandardButtons(QMessageBox.NoButton)
-        self.lock.release()
         self.mBox.show()
         # Sign message
         ThreadFuns.runInThread(self.signMessageSign, (), self.signMessageFinish)
@@ -484,11 +505,11 @@ class HWdevice(QObject):
             curr_input_signed = 0
             # sign all inputs on Ledger and add inputs in the self.new_transaction object for serialization
             for idx, new_input in enumerate(self.arg_inputs):
-                    
+                   
                 self.chip.startUntrustedTransaction(starting, idx, self.trusted_inputs, new_input['locking_script'])
-                
+                 
                 self.chip.finalizeInputFull(self.all_outputs_raw)
-
+                
                 sig = self.chip.untrustedHashSign(new_input['bip32_path'], lockTime=0)
                 
                 new_input['signature'] = sig
@@ -498,7 +519,7 @@ class HWdevice(QObject):
                 inputTx.script = bytearray([len(sig)]) + sig + bytearray([0x21]) + new_input['pubkey']
 
                 inputTx.sequence = bytearray([0xFF, 0xFF, 0xFF, 0xFF])
-
+                
                 self.new_transaction.inputs.append(inputTx)
 
                 starting = False
@@ -508,17 +529,22 @@ class HWdevice(QObject):
                 completion = int(100*curr_input_signed / len(self.arg_inputs))
                 self.sig_progress.emit(str(completion))
                 
-            
             self.new_transaction.lockTime = bytearray([0, 0, 0, 0])
             self.tx_raw = bytearray(self.new_transaction.serialize())
             self.sig_progress.emit("100")
             
         except Exception as e:
-            printException(getCallerName(), getFunctionName(), "Signature Exception", e.args)
+            if e.sw != 0x6985:
+                self.status = 0
+                printException(getCallerName(), getFunctionName(), e.message, e.args)
+                
             self.tx_raw = None
     
         finally:
             self.lock.release()
+            if self.status == 0:
+                self.dongle.close()
+                self.initDevice()
     
     
             

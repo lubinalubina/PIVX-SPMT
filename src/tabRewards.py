@@ -8,11 +8,11 @@ from threads import ThreadFuns
 from utils import checkPivxAddr
 from apiClient import ApiClient
 from constants import MPATH, MINIMUM_FEE, cache_File
+from hwdevice import DisconnectedException
 
 from PyQt5.QtCore import Qt, pyqtSlot
 from PyQt5.QtGui import QFont
-from PyQt5.Qt import QTableWidgetItem, QHeaderView, QItemSelectionModel,\
-    QApplication, QBrush
+from PyQt5.Qt import QTableWidgetItem, QHeaderView, QItemSelectionModel, QApplication
 from PyQt5.QtWidgets import QMessageBox
 
 from qt.gui_tabRewards import TabRewards_gui
@@ -30,7 +30,6 @@ class TabRewards():
         ##--- Initialize GUI
         self.ui = TabRewards_gui()
         self.caller.tabRewards = self.ui
-        self.ui.destinationLine.setText(self.caller.parent.cache.get("lastAddress"))
         self.ui.feeLine.setValue(MINIMUM_FEE)
         # Connect GUI buttons
         self.ui.mnSelect.currentIndexChanged.connect(lambda: self.onChangeSelectedMN())
@@ -76,7 +75,13 @@ class TabRewards():
                     
             if self.ui.rewardsList.box.collateralRow is not None:
                     self.ui.rewardsList.box.hideRow(self.ui.rewardsList.box.collateralRow)    
-                    
+            
+            # load last used destination from cache
+            self.ui.destinationLine.setText(self.caller.parent.cache.get("lastAddress")) 
+            # load useSwiftX check from cache
+            if self.caller.parent.cache.get("useSwiftX"):
+                self.ui.swiftxCheck.setChecked(True)
+                   
             if len(self.rewards) > 1:  # (collateral is a reward)
                 self.ui.rewardsList.box.resizeColumnsToContents()
                 self.ui.rewardsList.statusLabel.setVisible(False)
@@ -91,46 +96,36 @@ class TabRewards():
                     else:
                         self.ui.rewardsList.statusLabel.setText('<b style="color:purple">Unable to connect to API provider</b>')
                 self.ui.rewardsList.statusLabel.setVisible(True)
-            
-    
+              
         
             
             
             
     def getSelection(self):
-        try:
-            returnData = []
-            items = self.ui.rewardsList.box.selectedItems()
-            # Save row indexes to a set to avoid repetition
-            rows = set()
-            for i in range(0, len(items)):
-                row = items[i].row()
-                rows.add(row)
-            rowList = list(rows)
+        items = self.ui.rewardsList.box.selectedItems()
+        # Save row indexes to a set to avoid repetition
+        rows = set()
+        for i in range(0, len(items)):
+            row = items[i].row()
+            rows.add(row)
+        rowList = list(rows)  
+        return [self.rewards[row] for row in rowList]
             
-            return [self.rewards[row] for row in rowList]
-                
-            return returnData 
-        except Exception as e:
-            print(e)
-                       
-            
+
+       
             
             
     def loadMnSelect(self):
-        try:
-            self.ui.mnSelect.clear()            
-            for x in self.caller.masternode_list:
-                    name = x['name']
-                    address = x['collateral'].get('address')
-                    txid = x['collateral'].get('txid')
-                    hwAcc = x['hwAcc']
-                    spath = x['collateral'].get('spath')
-                    path = MPATH + "%d'/0/%d" % (hwAcc, spath)
-                    self.ui.mnSelect.addItem(name, [address, txid, path])
-        except Exception as e:
-            print(e)        
-                        
+        self.ui.mnSelect.clear()            
+        for x in self.caller.masternode_list:
+                name = x['name']
+                address = x['collateral'].get('address')
+                txid = x['collateral'].get('txid')
+                hwAcc = x['hwAcc']
+                spath = x['collateral'].get('spath')
+                path = MPATH + "%d'/0/%d" % (hwAcc, spath)
+                self.ui.mnSelect.addItem(name, [address, txid, path])
+                     
            
     
     
@@ -169,8 +164,9 @@ class TabRewards():
     
     
     
-    @pyqtSlot()
+    #@pyqtSlot()
     def onCancel(self):
+        self.selectedRewards = None
         self.ui.selectedRewardsLine.setText("0.0")
         self.ui.mnSelect.setCurrentIndex(0)
         self.ui.feeLine.setValue(MINIMUM_FEE)
@@ -258,12 +254,16 @@ class TabRewards():
             self.ui.loadingLine.show()
             self.ui.loadingLinePercent.show()
             QApplication.processEvents()            
-            # save destination address to cache
-            if self.dest_addr != self.caller.parent.cache.get("lastAddress"):
-                self.caller.parent.cache["lastAddress"] = self.dest_addr
-                writeToFile(self.caller.parent.cache, cache_File)
-                                
-            self.currFee = self.ui.feeLine.value() * 1e8
+            
+            # save last destination address and swiftxCheck to cache
+            self.caller.parent.cache["lastAddress"] = self.dest_addr
+            self.caller.parent.cache["useSwiftX"] = self.useSwiftX()
+            writeToFile(self.caller.parent.cache, cache_File)            
+            
+            if self.useSwiftX():
+                self.currFee = 0.01 * 1e8
+            else:
+                self.currFee = self.ui.feeLine.value() * 1e8
             
             # re-connect signal
             try:
@@ -279,12 +279,17 @@ class TabRewards():
             except:
                 pass
             self.caller.hwdevice.sigTxdone.connect(self.FinishSend)
-            self.caller.hwdevice.sigTxabort.connect(self.AbortSend)
+            self.caller.hwdevice.sigTxabort.connect(self.onCancel)
             self.caller.hwdevice.tx_progress.connect(self.updateProgressPercent)
 
             try:
                 self.txFinished = False
-                self.caller.hwdevice.prepare_transfer_tx(self.caller, self.curr_path, self.selectedRewards, self.dest_addr, self.currFee, self.rawtransactions)
+                self.caller.hwdevice.prepare_transfer_tx(self.caller, self.curr_path, self.selectedRewards, self.dest_addr, self.currFee, self.rawtransactions, self.useSwiftX())
+            
+            except DisconnectedException as e:
+                self.caller.hwStatus = 0
+                self.caller.updateHWleds()
+                
             except Exception as e:
                 err_msg = "Error while preparing transaction. <br>"
                 err_msg += "Probably Blockchain wasn't synced when trying to fetch raw TXs.<br>" 
@@ -305,7 +310,7 @@ class TabRewards():
                         if self.ui.rewardsList.box.item(self.ui.rewardsList.box.collateralRow, 0).isSelected():
                             self.ui.rewardsList.box.selectRow(self.ui.rewardsList.box.collateralRow)
                     except Exception as e:
-                        err_msg = "Error while preparing transaction"
+                        err_msg = "Error toggling collateral"
                         printException(getCallerName(), getFunctionName(), err_msg, e.args)
                     
                     self.ui.rewardsList.box.hideRow(self.ui.rewardsList.box.collateralRow)
@@ -323,7 +328,8 @@ class TabRewards():
         else:
             self.caller.myPopUp2(QMessageBox.Information, 'No Collateral', "No collateral selected")
             
-  
+            
+            
 
     # Activated by signal sigTxdone from hwdevice       
     #@pyqtSlot(bytearray, str)            
@@ -347,12 +353,13 @@ class TabRewards():
                     message = '<p>Broadcast signed transaction?</p><p>Destination address:<br><b>%s</b></p>' % destination
                     message += '<p>Amount: <b>%s</b> PIV<br>' % str(amount)
                     message += 'Fees: <b>%s</b> PIV <br>Size: <b>%d</b> Bytes</p>' % (str(round(self.currFee / 1e8, 8) ), len(tx_hex)/2)
+                    
                     mess1 = QMessageBox(QMessageBox.Information, 'Send transaction', message)
                     mess1.setDetailedText(json.dumps(decodedTx, indent=4, sort_keys=False))
                     mess1.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
                     reply = mess1.exec_()
-                    if reply == QMessageBox.Yes:                   
-                        txid = self.caller.rpcClient.sendRawTransaction(tx_hex)
+                    if reply == QMessageBox.Yes:                
+                        txid = self.caller.rpcClient.sendRawTransaction(tx_hex, self.useSwiftX())
                         mess2_text = "<p>Transaction successfully sent.</p><p>(Note that the selected rewards will remain displayed in the app until the transaction is confirmed.)</p>"
                         mess2 = QMessageBox(QMessageBox.Information, 'transaction Sent', mess2_text)
                         mess2.setDetailedText(txid)
@@ -405,4 +412,9 @@ class TabRewards():
         else:
             self.ui.selectedRewardsLine.setText("")
             self.ui.feeLine.setValue(MINIMUM_FEE)
+            
+            
+            
+    def useSwiftX(self):
+        return self.ui.swiftxCheck.isChecked()
         
