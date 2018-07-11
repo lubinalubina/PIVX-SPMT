@@ -4,6 +4,7 @@ from bitcoinrpc.authproxy import AuthServiceProxy, JSONRPCException
 from misc import getCallerName, getFunctionName, printException, printDbg, readRPCfile, now
 from constants import DEFAULT_PROTOCOL_VERSION, MINIMUM_FEE
 import threading
+from tabGovernance import Proposal
 
 class RpcClient:
         
@@ -88,6 +89,20 @@ class RpcClient:
         return h
     
     
+    def getBudgetVotes(self, proposal):
+        try:
+            self.lock.acquire()
+            votes = self.conn.getbudgetvotes(proposal)
+        except Exception as e:
+            err_msg = 'remote or local PIVX-cli running?'
+            printException(getCallerName(), getFunctionName(), err_msg, e.args)
+            votes = {}
+        finally:
+            self.lock.release()
+            
+        return votes
+    
+    
     def getFeePerKb(self):
         try:
             self.lock.acquire()
@@ -122,6 +137,20 @@ class RpcClient:
             
         return mnStatus
                 
+                
+
+    def getMasternodeCount(self):
+        try:
+            self.lock.acquire()
+            ans = self.conn.getmasternodecount()
+        except Exception as e:
+            err_msg = "error in getMasternodeCount"
+            printException(getCallerName(), getFunctionName(), err_msg, e.args)
+            ans = None
+        finally:
+            self.lock.release()
+            
+        return ans
                 
                 
     def getMasternodes(self):
@@ -160,6 +189,72 @@ class RpcClient:
         mnList['masternodes'] = masternodes
                 
         return mnList
+    
+    
+    
+    def getNextSuperBlock(self):
+        try:
+            self.lock.acquire()
+            n = self.conn.getnextsuperblock()
+        except Exception as e:
+            err_msg = 'remote or local PIVX-cli running?'
+            if str(e.args[0]) != "Request-sent":
+                printException(getCallerName(), getFunctionName(), err_msg, e.args)
+            n = 0
+        finally:
+            self.lock.release()
+            
+        return n    
+    
+    
+    
+    def getProposals(self):
+        proposals = []
+        try:
+            self.lock.acquire()
+            data = self.conn.getbudgetinfo()
+        except Exception as e:
+            err_msg = "error getting proposals"
+            printException(getCallerName(), getFunctionName(), err_msg, e.args)
+            data = []
+        finally:
+            self.lock.release()
+            
+        for p in data:
+            new_proposal = Proposal(p.get('Name'), p.get('URL'), p.get('Hash'), p.get('FeeHash'), p.get('BlockStart'), 
+                                    p.get('BlockEnd'), p.get('TotalPaymentCount'), p.get('RemainingPaymentCount'), p.get('PaymentAddress'), 
+                                    p.get('Yeas'), p.get('Nays'), p.get('Abstains'), 
+                                    float(p.get('TotalPayment')), float(p.get('MonthlyPayment')))
+            proposals.append(new_proposal)
+            
+        return proposals
+    
+    
+    
+    def getProposalsProjection(self):
+        proposals = []
+        try:
+            self.lock.acquire()
+            data = self.conn.getbudgetprojection()
+        except Exception as e:
+            err_msg = "error getting proposals projection"
+            printException(getCallerName(), getFunctionName(), err_msg, e.args)
+            data = []
+        finally:
+            self.lock.release()
+            
+        for p in data:
+            new_proposal = Proposal(p.get('Name'), p.get('URL'), p.get('Hash'), p.get('FeeHash'), p.get('BlockStart'), 
+                                    p.get('BlockEnd'), p.get('TotalPaymentCount'), p.get('RemainingPaymentCount'), p.get('PaymentAddress'), 
+                                    p.get('Yeas'), p.get('Nays'), p.get('Abstains'), p.get('TotalPayment'), p.get('MonthlyPayment'))
+            new_proposal = {}
+            new_proposal['Name'] = p.get('Name')
+            new_proposal['Allotted'] = float(p.get("Alloted"))
+            new_proposal['Votes'] = p.get('Yeas') - p.get('Nays')
+            new_proposal['Total_Allotted'] = float(p.get('TotalBudgetAlloted'))
+            proposals.append(new_proposal)
+            
+        return proposals
     
     
     
@@ -240,7 +335,21 @@ class RpcClient:
             self.lock.release()
         
         return res
-            
+    
+    
+    
+    def mnBudgetRawVote(self, mn_tx_hash, mn_tx_index, proposal_hash, vote, time, vote_sig):
+        try:
+            self.lock.acquire()
+            res = self.conn.mnbudgetrawvote(mn_tx_hash, mn_tx_index, proposal_hash, vote, time, vote_sig)
+        except Exception as e:
+            err_msg = "error in mnBudgetRawVote"
+            printException(getCallerName(), getFunctionName(), err_msg, e.args)
+            res = None
+        finally:
+            self.lock.release()
+        
+        return res   
             
             
     def decodemasternodebroadcast(self, work):

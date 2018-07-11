@@ -22,6 +22,7 @@ from qt.guiHeader import GuiHeader
 from tabMain import TabMain
 from tabMNConf import TabMNConf
 from tabRewards import TabRewards
+from tabGovernance import TabGovernance
 from threads import ThreadFuns
 from watchdogThreads import RpcWatchdog
     
@@ -93,11 +94,13 @@ class MainWindow(QWidget):
         self.t_main = TabMain(self)
         self.t_mnconf = TabMNConf(self)
         self.t_rewards = TabRewards(self)
+        self.t_governance = TabGovernance(self)
         
         ###-- Add tabs
         self.tabs.addTab(self.tabMain, "Masternode Control")
         #self.tabs.addTab(self.tabMNConf, "MN Configuration")
-        self.tabs.addTab(self.tabRewards, "Transfer Rewards")              
+        self.tabs.addTab(self.tabRewards, "Transfer Rewards")
+        self.tabs.addTab(self.tabGovernance, "Governance")            
         ###-- Connect change action
         self.tabs.currentChanged.connect(lambda: self.onTabChange())                    
         ###-- Draw Tabs 
@@ -133,10 +136,6 @@ class MainWindow(QWidget):
     def append_to_console(self, text):
         self.consoleArea.moveCursor(QTextCursor.End)
         self.consoleArea.insertHtml(text)
-        # update last logs
-        logFile = open(log_File, 'a+')
-        logFile.write(text)
-        logFile.close()
             
             
             
@@ -296,6 +295,10 @@ class MainWindow(QWidget):
             self.t_rewards.loadMnSelect()
             self.t_rewards.selectedRewards = None
             
+        # reload proposal list
+        if self.tabs.currentWidget() == self.tabGovernance:
+            self.t_governance.onRefreshProposals()
+            
         
         
         
@@ -422,11 +425,5 @@ class MainWindow(QWidget):
         # If is not connected try again
         if not status:
             self.rpcClient = RpcClient()
-    
-    
-    
-    
-    
-    
     
     

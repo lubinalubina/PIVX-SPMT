@@ -1,5 +1,5 @@
 {
- "number": "0.2.3",
+ "number": "0.3.0",
  "tag": "a",
- "comments": [""]
+ "comments": ["Governance Tab"]
  }
